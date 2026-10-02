@@ -1,0 +1,7 @@
+# NVIDIA files are never committed - users supply their own
+*.run
+NVIDIA-Linux-*/
+*.ko
+*.o
+m10_cuda_selftest
+__pycache__/
