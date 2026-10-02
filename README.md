@@ -33,7 +33,15 @@ machine.
      `os_flush_user_cache`, `nv_dma_cache_invalidate`). The last now really invalidates.
    - When the kernel reports the GPU's DMA as non-coherent, it maps all
      driver-allocated system memory **uncached** (Normal-NC) instead of cached.
+   - Cleans the CPU cache over each new uncached allocation, so dirty lines
+     left from zeroing it can't later overwrite data the GPU or CPU wrote.
+   - Refuses `cudaHostRegister` (registering ordinary process memory) on
+     non-coherent hosts. The process's own cached mapping of that memory
+     can't be changed, so it would silently corrupt data.
    - Turns off write-combined mappings of the GPU's PCIe memory windows on arm64.
+   - In `nvidia-uvm`, maps managed memory (`cudaMallocManaged`) and UVM's own
+     system memory uncached too. UVM maps these itself, so the main fix above
+     doesn't reach them.
 3. **`scripts/install.sh`** extracts your `.run`, verifies it, runs steps 1–2, then runs
    NVIDIA's installer with display/GL parts disabled. Your desktop stays on the
    board's Mali GPU, and the M10 is used for compute only.
@@ -47,13 +55,25 @@ machine.
 | `arm_force_uncached` | `1` | Uncached system memory on non-coherent hosts. `0` = stock behaviour. |
 | `arm_disable_iomap_wc` | `1` | Never map GPU memory windows write-combined. |
 | `arm_assume_noncoherent` | `-1` | `-1` ask the kernel, `1` force non-coherent, `0` force coherent. |
+| `arm_allow_host_register` | `0` | `1` = allow `cudaHostRegister` on non-coherent hosts anyway (can corrupt data). |
+
+`nvidia-uvm` has one (`options nvidia-uvm ...`):
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `uvm_arm_uncached_sysmem` | `1` | Uncached managed/UVM system memory on non-coherent hosts. `0` = stock behaviour. |
+
+If CUDA fails to start and `dmesg` shows `refusing to register user memory`,
+something besides `cudaHostRegister` needs that path: set
+`arm_allow_host_register=1` and report it in an issue.
 
 ## Tested so far
 
 | | Status |
 |---|---|
 | Patches apply to stock 580.95.05 aarch64 | ✅ (sha256-verified input) |
-| Module builds against Linux 6.18.52 arm64 | ✅ cross-compiled |
+| Module builds against Linux 6.18.52 arm64 | ✅ cross-compiled (before the host-register, cache-clean and UVM changes) |
+| Current patches compile against Linux 6.18 arm64 | ⚠️ only on NVIDIA's open-module sources at the same version, as a stand-in |
 | All functions the closed core imports resolve | ✅ |
 | CUDA self-test compiles for sm_50 | ✅ (CUDA 12.9 `ptxas`) |
 | Loads on an Orange Pi 5 Plus | ❌ not yet tried |
@@ -107,8 +127,13 @@ cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=50 && cmake --build bui
 - **PCIe BAR space.** RK3588 PCIe windows are small. Four GPUs plus a switch may not get
   their BARs assigned. `check-pcie.sh` reports it, and fixing it needs device-tree changes.
 - **Atomics on uncached memory** may not work on RK3588. A hang, SError or alignment fault
-  after init, or a failing "atomics in mapped host memory" self-test, points here.
+  after init points here. The self-test's "atomics in mapped host memory" line is
+  informational only: CUDA doesn't promise those atomics on Maxwell over PCIe even on x86.
   The next step would be targeted fixes inside the closed core instead of forcing everything uncached.
+  This now includes CPU-side atomics in programs using `cudaMallocManaged` memory.
+- **Kernel-side copies inside UVM** (CPU-to-CPU page migration between NUMA nodes,
+  debugger memory access) still go through cached mappings. RK3588 has one NUMA node,
+  so the first shouldn't happen.
 - **Performance** is modest: each GM107 has 8 GB at ~83 GB/s, no fast FP16 and no `dp4a`.
 
 ## Reporting results

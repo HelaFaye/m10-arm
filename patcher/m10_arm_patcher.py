@@ -27,7 +27,9 @@ MARKER = "M10/RK3588 port"
 
 # sha256 of the stock 580.95.05 aarch64 files this project touches (directly or
 # via the upstream non-coherent-arm-fixes diff). Used only to refuse to patch
-# a different driver version.
+# a different driver version. The nvidia-uvm files this project edits aren't
+# listed (their stock hashes weren't recorded); the files below already pin
+# the version, and an anchor mismatch there aborts before anything is written.
 STOCK_SHA256 = {
     "common/inc/nv.h":           "8b3c5b3c3c295f7dbfa79045ace39142a307db600ababb42d90562b428c5e7b4",
     "common/inc/os-interface.h": "4849df93877a2a7dd020204be28237802646de7f419920f482adb9735a14484b",
@@ -150,8 +152,18 @@ module_param_named(arm_assume_noncoherent, nv_arm_assume_noncoherent, int, 0444)
 MODULE_PARM_DESC(arm_assume_noncoherent,
     "arm64: -1 = ask the kernel (default), 0 = coherent, 1 = non-coherent");
 
+static int nv_arm_allow_host_register = 0;
+module_param_named(arm_allow_host_register, nv_arm_allow_host_register, int, 0444);
+MODULE_PARM_DESC(arm_allow_host_register,
+    "arm64: allow registering user memory (cudaHostRegister) on "
+    "non-DMA-coherent hosts, where it can silently corrupt data (default 0)");
+
 static NvBool nv_arm_any_noncoherent_dev = NV_FALSE;
 static atomic_t nv_arm_forced_allocs = ATOMIC_INIT(0);
+/* First non-coherent GPU; used for cache maintenance on allocations that
+ * have no device. Its reference is never dropped, so the struct device
+ * outlives the module (harmless unless the GPU is hot-unplugged). */
+static struct device *nv_arm_flush_dev;
 
 NvBool nv_arm_is_noncoherent(nv_state_t *nv)
 {
@@ -171,7 +183,14 @@ void nv_arm_note_device(nv_state_t *nv)
 #if defined(NVCPU_AARCH64)
     NvBool nc = nv_arm_is_noncoherent(nv);
     if (nc)
+    {
+        /* kobject_get/put: get_device() is GPL-only, this module isn't */
+        struct device *dev = nv->dma_dev->dev;
         nv_arm_any_noncoherent_dev = NV_TRUE;
+        kobject_get(&dev->kobj);
+        if (cmpxchg(&nv_arm_flush_dev, NULL, dev) != NULL)
+            kobject_put(&dev->kobj);
+    }
     nv_printf(NV_DBG_ERRORS,
         "NVRM: arm64: %04x:%02x:%02x: DMA %s; sysmem %s, BAR WC %s\n",
         nv->pci_info.domain, nv->pci_info.bus, nv->pci_info.slot,
@@ -190,6 +209,51 @@ NvBool nv_arm_disable_iomap_wc(void)
     return rm_disable_iomap_wc();
 }
 
+/*
+ * Write back the CPU cache lines covering a new uncached allocation. Its pages
+ * were just zeroed (or last used) through the kernel's cacheable linear map.
+ * If those dirty lines were evicted later, they would overwrite data already
+ * written through the uncached alias. dma_map_page() on a non-coherent device
+ * cleans the range to the point of coherency, which is all we need. (A
+ * swiotlb-bounced mapping would not; on RK3588 the M10's 40-bit DMA mask
+ * covers all of RAM, so that shouldn't happen.)
+ */
+static void nv_arm_clean_alloc(nv_alloc_t *at, struct device *dev)
+{
+#if defined(NVCPU_AARCH64)
+    NvU64 i, run;
+
+    if (dev == NULL)
+        dev = nv_arm_flush_dev;
+    if ((dev == NULL) || at->flags.coherent)
+        return;
+
+    for (i = 0; i < at->num_pages; i += run)
+    {
+        NvU64 phys = at->page_table[i].phys_addr;
+        size_t size;
+        dma_addr_t dma;
+
+        /* One map/unmap per physically contiguous run */
+        for (run = 1; (i + run) < at->num_pages; run++)
+        {
+            if (at->page_table[i + run].phys_addr != phys + run * PAGE_SIZE)
+                break;
+        }
+        size = run * PAGE_SIZE;
+
+        dma = dma_map_page(dev, NV_GET_PAGE_STRUCT(phys), 0, size, DMA_TO_DEVICE);
+        if (dma_mapping_error(dev, dma))
+        {
+            printk_once(KERN_WARNING "NVRM: arm64: cache clean of new "
+                        "allocation failed; data corruption possible\n");
+            continue;
+        }
+        dma_unmap_page(dev, dma, size, DMA_TO_DEVICE);
+    }
+#endif
+}
+
 """
 
 NV_C_OVERRIDE = r"""#if defined(NVCPU_AARCH64)
@@ -204,6 +268,102 @@ NV_C_OVERRIDE = r"""#if defined(NVCPU_AARCH64)
                 "NVRM: arm64: forcing RM sysmem allocations uncached "
                 "(non-coherent DMA)\n");
     }
+#endif
+
+"""
+
+NV_C_CLEAN = r"""#if defined(NVCPU_AARCH64)
+    /* M10/RK3588 port: see nv_arm_clean_alloc() */
+    if ((at->cache_type != NV_MEMORY_CACHED) && nv_arm_is_noncoherent(nv))
+        nv_arm_clean_alloc(at, dev);
+#endif
+
+"""
+
+NV_C_HOST_REGISTER = r"""#if defined(NVCPU_AARCH64)
+    /*
+     * M10/RK3588 port: the process keeps its own cacheable mapping of these
+     * pages, which we can't change, and the RM does no cache maintenance for
+     * them. On a non-coherent host the GPU would then see stale data (and the
+     * CPU stale GPU writes). Refuse instead of corrupting data silently.
+     */
+    if (!nv_arm_allow_host_register && nv_arm_is_noncoherent(nv))
+    {
+        printk_once(KERN_INFO "NVRM: arm64: refusing to register user memory "
+                    "(e.g. cudaHostRegister) on a non-coherent host; "
+                    "nvidia.arm_allow_host_register=1 overrides\n");
+        return NV_ERR_NOT_SUPPORTED;
+    }
+#endif
+
+"""
+
+# nvidia-uvm: managed memory and UVM's own sysmem are mapped by UVM itself,
+# not through nv_alloc_pages(), so they need the same treatment there.
+UVM_GPU_C_POLICY = r"""/*
+ * M10/RK3588 port: non-coherent Arm policy for UVM.
+ *
+ * UVM maps managed memory (cudaMallocManaged) and its own system memory
+ * cacheable for the CPU and does no cache maintenance, assuming the GPU snoops
+ * CPU caches. On hosts where it doesn't (e.g. RK3588), map them uncached
+ * (Normal-NC) instead, as nvidia.ko does for RM memory. New pages are zeroed
+ * through the cacheable linear map; the dma_map_page() in
+ * uvm_gpu_map_cpu_pages() cleans them when they are mapped for the GPU.
+ */
+#if defined(NVCPU_AARCH64) && defined(NV_DEV_IS_DMA_COHERENT_PRESENT)
+#include <linux/dma-map-ops.h>
+#endif
+
+static int uvm_arm_uncached_sysmem = 1;
+module_param(uvm_arm_uncached_sysmem, int, S_IRUGO);
+MODULE_PARM_DESC(uvm_arm_uncached_sysmem,
+    "arm64: map UVM system memory uncached on non-DMA-coherent hosts (default 1)");
+
+static bool uvm_arm_any_noncoherent;
+
+bool uvm_arm_sysmem_uncached(void)
+{
+    return uvm_arm_uncached_sysmem && READ_ONCE(uvm_arm_any_noncoherent);
+}
+
+static void uvm_arm_note_parent_gpu(uvm_parent_gpu_t *parent_gpu)
+{
+#if defined(NVCPU_AARCH64) && defined(NV_DEV_IS_DMA_COHERENT_PRESENT)
+    if ((parent_gpu->pci_dev != NULL) && !dev_is_dma_coherent(&parent_gpu->pci_dev->dev)) {
+        WRITE_ONCE(uvm_arm_any_noncoherent, true);
+        pr_info("nvidia-uvm: arm64: %s: DMA NON-coherent; UVM sysmem %s\n",
+                pci_name(parent_gpu->pci_dev),
+                uvm_arm_uncached_sysmem ? "mapped uncached" : "left cached");
+    }
+#endif
+}
+
+"""
+
+UVM_GPU_H_DECL = """// M10/RK3588 port: true if UVM system memory must be mapped uncached
+bool uvm_arm_sysmem_uncached(void);
+
+"""
+
+UVM_PGPROT_FIX = r"""#if defined(NVCPU_AARCH64)
+    // M10/RK3588 port: see uvm_arm_sysmem_uncached()
+    if (uvm_arm_sysmem_uncached())
+        target_pgprot = pgprot_writecombine(target_pgprot);
+#endif
+"""
+
+UVM_MEM_KERNEL_FIX = r"""#if defined(NVCPU_AARCH64)
+    // M10/RK3588 port: see uvm_arm_sysmem_uncached()
+    if (uvm_arm_sysmem_uncached())
+        prot = pgprot_writecombine(prot);
+#endif
+
+"""
+
+UVM_MEM_USER_FIX = r"""#if defined(NVCPU_AARCH64)
+    // M10/RK3588 port: see uvm_arm_sysmem_uncached()
+    if (uvm_arm_sysmem_uncached())
+        vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 #endif
 
 """
@@ -238,13 +398,41 @@ EDITS = [
     ("nvidia/nv-pci.c", "insert_after",
      "    nv->pci_info.slot      = NV_PCI_SLOT_NUMBER(pci_dev);\n",
      NV_PCI_C_HOOK),
+    # Before nv_register_user_pages(), the first function that uses it.
     ("nvidia/nv.c", "insert_before",
-     "NV_STATUS NV_API_CALL nv_alloc_pages(\n",
+     "NV_STATUS NV_API_CALL nv_register_user_pages(\n",
      NV_C_POLICY),
+    ("nvidia/nv.c", "insert_before_in_func",
+     ("NV_STATUS NV_API_CALL nv_register_user_pages(\n",
+      "    at = nvos_create_alloc(nvl->dev, page_count);\n"),
+     NV_C_HOST_REGISTER),
     ("nvidia/nv.c", "insert_before_in_func",
      ("NV_STATUS NV_API_CALL nv_alloc_pages(\n",
       "    at = nvos_create_alloc(dev, page_count);\n"),
      NV_C_OVERRIDE),
+    ("nvidia/nv.c", "insert_before_in_func",
+     ("NV_STATUS NV_API_CALL nv_alloc_pages(\n",
+      "    for (i = 0; i < ((contiguous) ? 1 : page_count); i++)\n"),
+     NV_C_CLEAN),
+    ("nvidia-uvm/uvm_gpu.h", "insert_before",
+     "static bool uvm_parent_gpu_is_coherent(",
+     UVM_GPU_H_DECL),
+    ("nvidia-uvm/uvm_gpu.c", "insert_before",
+     "static NV_STATUS init_parent_gpu(uvm_parent_gpu_t *parent_gpu,\n",
+     UVM_GPU_C_POLICY),
+    ("nvidia-uvm/uvm_gpu.c", "insert_after",
+     "    parent_gpu->pci_dev = gpu_platform_info->pci_dev;\n",
+     "    uvm_arm_note_parent_gpu(parent_gpu);\n"),
+    ("nvidia-uvm/uvm_va_block.c", "insert_after",
+     "    target_pgprot = vm_get_page_prot(target_flags);\n",
+     UVM_PGPROT_FIX),
+    ("nvidia-uvm/uvm_mem.c", "insert_before",
+     "    mem->kernel.cpu_addr = vmap(pages, num_pages, VM_MAP, prot);\n",
+     UVM_MEM_KERNEL_FIX),
+    ("nvidia-uvm/uvm_mem.c", "insert_before",
+     "    for (offset = 0; offset < uvm_mem_physical_size(mem); offset += PAGE_SIZE) {\n"
+     "        int ret = vm_insert_page(",
+     UVM_MEM_USER_FIX),
 ]
 
 # Files that must show the upstream non-coherent-arm-fixes before we apply.

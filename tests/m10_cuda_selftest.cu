@@ -67,6 +67,82 @@ static bool report(const char *name, size_t bad, size_t n)
     return bad == 0;
 }
 
+// Count words that don't match fill()'s output.
+static size_t count_bad_fill(const unsigned *p, size_t n, unsigned k)
+{
+    size_t bad = 0;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] != k + (unsigned)i * 7u) bad++;
+    return bad;
+}
+
+// 6. Registered user memory (cudaHostRegister). The patched driver refuses it
+//    on non-coherent hosts (stale-cache corruption otherwise), so a clean
+//    error is a pass; if it is allowed, the data must be right.
+static bool test_host_register(int dev, int rounds, size_t n, unsigned *d_in, unsigned *d_out)
+{
+    const size_t bytes = n * sizeof(unsigned);
+    unsigned *buf = (unsigned *)std::aligned_alloc(4096, (bytes + 4095) & ~(size_t)4095);
+    if (!buf) { std::printf("    cudaHostRegister: out of host memory\n"); return false; }
+    std::vector<unsigned> ref(n);   // buf is reused for the result
+
+    cudaError_t e = cudaHostRegister(buf, bytes, cudaHostRegisterDefault);
+    if (e != cudaSuccess) {
+        cudaGetLastError();   // clear the (non-sticky) error
+        std::printf("    %-34s ok  (refused: %s - expected on non-coherent hosts)\n",
+                    "cudaHostRegister", cudaGetErrorName(e));
+        std::free(buf);
+        return true;
+    }
+
+    size_t bad = 0;
+    for (int r = 0; r < rounds; r++) {
+        pattern(buf, n, 5000u * dev + r);
+        std::memcpy(ref.data(), buf, bytes);
+        unsigned k = 0x165667b1u * (r + 1);
+        CK(cudaMemcpy(d_in, buf, bytes, cudaMemcpyHostToDevice));
+        transform<<<256, 256>>>(d_in, d_out, n, k);
+        CK(cudaGetLastError());
+        std::memset(buf, 0xEF, bytes);   // poison: stale data must not survive
+        CK(cudaMemcpy(buf, d_out, bytes, cudaMemcpyDeviceToHost));
+        bad += count_bad_transform(ref.data(), buf, n, k);
+    }
+    bool ok = report("cudaHostRegister (allowed) memcpy", bad, n * rounds);
+    CK(cudaHostUnregister(buf));
+    std::free(buf);
+    return ok;
+}
+
+// 7. Managed memory (cudaMallocManaged): CPU writes, GPU transforms, CPU
+//    reads, with fresh data each round. On Maxwell, pages migrate at kernel
+//    launch/sync - this is the nvidia-uvm path, not the RM one.
+static bool test_managed(int dev, int rounds, size_t n)
+{
+    const size_t bytes = n * sizeof(unsigned);
+    unsigned *in, *out;
+    CK(cudaMallocManaged(&in, bytes));
+    CK(cudaMallocManaged(&out, bytes));
+    size_t bad = 0, bad_fill = 0;
+    for (int r = 0; r < rounds; r++) {
+        pattern(in, n, 6000u * dev + r);
+        std::memset(out, 0x5A, bytes);
+        unsigned k = 0xd3a2646cu * (r + 1);
+        transform<<<256, 256>>>(in, out, n, k);
+        CK(cudaGetLastError());
+        CK(cudaDeviceSynchronize());
+        bad += count_bad_transform(in, out, n, k);
+
+        fill<<<256, 256>>>(out, n, k);   // GPU-only write, then CPU read
+        CK(cudaGetLastError());
+        CK(cudaDeviceSynchronize());
+        bad_fill += count_bad_fill(out, n, k);
+    }
+    bool ok = report("managed CPU->GPU->CPU", bad, n * rounds);
+    ok &= report("managed GPU write -> CPU read", bad_fill, n * rounds);
+    CK(cudaFree(in)); CK(cudaFree(out));
+    return ok;
+}
+
 static bool test_device(int dev, int rounds, size_t n)
 {
     cudaDeviceProp p;
@@ -126,9 +202,9 @@ static bool test_device(int dev, int rounds, size_t n)
         std::memset(m_buf, 0xCD, bytes);   // CPU writes old data first
         unsigned k = 0xc2b2ae35u * (r + 1);
         fill<<<blocks, threads>>>(m_dev, n, k);
+        CK(cudaGetLastError());
         CK(cudaDeviceSynchronize());
-        for (size_t i = 0; i < n; i++)
-            if (m_buf[i] != k + (unsigned)i * 7u) bad++;
+        bad += count_bad_fill(m_buf, n, k);
     }
     ok &= report("zero-copy GPU->host writes", bad, n * rounds);
 
@@ -138,6 +214,7 @@ static bool test_device(int dev, int rounds, size_t n)
         pattern(m_buf, n, 3000u * dev + r);
         unsigned k = 0x27d4eb2fu * (r + 1);
         transform<<<blocks, threads>>>(m_dev, d_out, n, k);
+        CK(cudaGetLastError());
         CK(cudaMemcpy(h_out.data(), d_out, bytes, cudaMemcpyDeviceToHost));
         bad += count_bad_transform(m_buf, h_out.data(), n, k);
     }
@@ -151,16 +228,25 @@ static bool test_device(int dev, int rounds, size_t n)
     CK(cudaMalloc(&d_ctr, sizeof *d_ctr));
     CK(cudaMemset(d_ctr, 0, sizeof *d_ctr));
     atomic_count<<<at_blocks, at_threads>>>(d_ctr, per);
+    CK(cudaGetLastError());
     CK(cudaMemcpy(&h_ctr, d_ctr, sizeof h_ctr, cudaMemcpyDeviceToHost));
     ok &= report("atomics in device memory", h_ctr != want, 1);
 
     unsigned long long *m_ctr, *m_ctr_dev;
     CK(cudaHostAlloc(&m_ctr, sizeof *m_ctr, cudaHostAllocMapped));
     CK(cudaHostGetDevicePointer(&m_ctr_dev, m_ctr, 0));
+    // Informational only: CUDA doesn't guarantee atomics on mapped host
+    // memory over PCIe for Maxwell, so a mismatch here may happen on x86
+    // too. A hang or bus error here, though, points at the Arm host.
     *m_ctr = 0;
     atomic_count<<<at_blocks, at_threads>>>(m_ctr_dev, per);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
-    ok &= report("atomics in mapped host memory", *m_ctr != want, 1);
+    std::printf("    %-34s %s  (informational, not counted)\n",
+                "atomics in mapped host memory", *m_ctr == want ? "ok" : "MISMATCH");
+
+    ok &= test_host_register(dev, rounds, n, d_in, d_out);
+    ok &= test_managed(dev, rounds, n);
 
     CK(cudaFreeHost(m_ctr)); CK(cudaFree(d_ctr));
     CK(cudaFreeHost(m_buf));
@@ -194,7 +280,12 @@ static bool test_peer(int a, int b, size_t n)
 int main(int argc, char **argv)
 {
     int rounds = argc > 1 ? std::atoi(argv[1]) : 8;
-    size_t mib = argc > 2 ? (size_t)std::atoi(argv[2]) : 64;
+    int mib_arg = argc > 2 ? std::atoi(argv[2]) : 64;
+    if (rounds < 1 || mib_arg < 1) {
+        std::printf("usage: %s [rounds >= 1] [MiB >= 1]\n", argv[0]);
+        return 2;
+    }
+    size_t mib = (size_t)mib_arg;
     size_t n = mib * 1024 * 1024 / sizeof(unsigned);
 
     int drv = 0, rt = 0, count = 0;
