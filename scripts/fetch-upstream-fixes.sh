@@ -33,10 +33,14 @@ trap 'rm -rf "$TMP"' EXIT
 echo ">> Fetching $REPO ($BRANCH)"
 git clone -q --filter=blob:none --no-checkout "$REPO" "$TMP/ogkm"
 git -C "$TMP/ogkm" fetch -q origin "$BRANCH"
-git -C "$TMP/ogkm" cat-file -e "$HEAD^{commit}" || { echo "pinned commit $HEAD not found"; exit 1; }
+for c in "$BASE" "$HEAD"; do
+    git -C "$TMP/ogkm" cat-file -e "$c^{commit}" 2>/dev/null || { echo "pinned commit $c not found"; exit 1; }
+done
 
 git -C "$TMP/ogkm" diff "$BASE" "$HEAD" -- kernel-open \
     | sed 's#\([ab]\)/kernel-open/#\1/#g' > "$TMP/upstream.patch"
+# POSIX sh has no pipefail: an empty patch means git diff failed.
+[ -s "$TMP/upstream.patch" ] || { echo "upstream diff is empty"; exit 1; }
 
 echo ">> Applying upstream kernel-open changes to $KDIR"
 patch -d "$KDIR" -p1 --forward --no-backup-if-mismatch --quiet < "$TMP/upstream.patch"

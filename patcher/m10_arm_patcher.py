@@ -234,8 +234,9 @@ EDITS = [
     ("nvidia/nv-dma.c", "insert_before",
      "NvBool NV_API_CALL nv_dev_is_dma_coherent\n",
      NV_DMA_C_SHIM),
+    # After pci_info is filled in, so the log line shows the right address.
     ("nvidia/nv-pci.c", "insert_after",
-     "    nv->dma_dev            = &nvl->dma_dev;\n",
+     "    nv->pci_info.slot      = NV_PCI_SLOT_NUMBER(pci_dev);\n",
      NV_PCI_C_HOOK),
     ("nvidia/nv.c", "insert_before",
      "NV_STATUS NV_API_CALL nv_alloc_pages(\n",
@@ -275,7 +276,10 @@ def write(root, rel, text):
 def cmd_verify_stock(root):
     bad = []
     for rel, want in sorted(STOCK_SHA256.items()):
-        with open(os.path.join(root, rel), "rb") as f:
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            die("missing %s - is this a 580.95.05 aarch64 'kernel' directory?" % path)
+        with open(path, "rb") as f:
             got = hashlib.sha256(f.read()).hexdigest()
         if got != want:
             bad.append(rel)
@@ -338,7 +342,6 @@ def cmd_apply(root):
 
 def main():
     if len(sys.argv) != 3 or sys.argv[1] not in ("verify-stock", "apply", "check"):
-        print(__doc__ or "", file=sys.stderr)
         print("usage: %s {verify-stock|apply|check} <driver>/kernel" % sys.argv[0],
               file=sys.stderr)
         sys.exit(2)

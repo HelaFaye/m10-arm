@@ -12,6 +12,10 @@ echo; echo "== Problems"
 if lspci -vvv -d 10de: 2>/dev/null | grep -q "unassigned"; then
     echo "!! Some BARs are unassigned: the PCIe address window is too small (device tree fix needed)."
 fi
-dmesg 2>/dev/null | grep -iE "BAR .*(no space|failed)|can't assign" || echo "no BAR assignment errors in dmesg"
+if ! dmesg >/dev/null 2>&1; then
+    echo "!! Can't read dmesg (run with sudo); BAR assignment errors not checked."
+else
+    dmesg | grep -iE "BAR .*(no space|failed)|can't assign" || echo "no BAR assignment errors in dmesg"
+fi
 n=$(lspci -n -d 10de:13bd | wc -l)
 echo "M10 GPUs found: $n (expected 4)"
