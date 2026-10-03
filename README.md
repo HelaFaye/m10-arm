@@ -41,7 +41,8 @@ machine.
    - Turns off write-combined mappings of the GPU's PCIe memory windows on arm64.
    - In `nvidia-uvm`, maps managed memory (`cudaMallocManaged`) and UVM's own
      system memory uncached too. UVM maps these itself, so the main fix above
-     doesn't reach them.
+     doesn't reach them. It also cleans the CPU cache around UVM's own CPU-side
+     copies and its CPU writes to GPU page tables in system memory.
 3. **`scripts/install.sh`** extracts your `.run`, verifies it, runs steps 1–2, then runs
    NVIDIA's installer with display/GL parts disabled. Your desktop stays on the
    board's Mali GPU, and the M10 is used for compute only.
@@ -131,9 +132,10 @@ cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=50 && cmake --build bui
   informational only: CUDA doesn't promise those atomics on Maxwell over PCIe even on x86.
   The next step would be targeted fixes inside the closed core instead of forcing everything uncached.
   This now includes CPU-side atomics in programs using `cudaMallocManaged` memory.
-- **Kernel-side copies inside UVM** (CPU-to-CPU page migration between NUMA nodes,
-  debugger memory access) still go through cached mappings. RK3588 has one NUMA node,
-  so the first shouldn't happen.
+- **Cache maintenance cost.** The driver now cleans the CPU cache by address
+  (`dc civac`) over every new uncached allocation and over every page UVM maps for
+  a GPU. That's independent of swiotlb and the IOMMU, but large allocations take
+  longer to set up.
 - **Performance** is modest: each GM107 has 8 GB at ~83 GB/s, no fast FP16 and no `dp4a`.
 
 ## Reporting results

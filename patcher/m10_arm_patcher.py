@@ -27,9 +27,7 @@ MARKER = "M10/RK3588 port"
 
 # sha256 of the stock 580.95.05 aarch64 files this project touches (directly or
 # via the upstream non-coherent-arm-fixes diff). Used only to refuse to patch
-# a different driver version. The nvidia-uvm files this project edits aren't
-# listed (their stock hashes weren't recorded); the files below already pin
-# the version, and an anchor mismatch there aborts before anything is written.
+# a different driver version.
 STOCK_SHA256 = {
     "common/inc/nv.h":           "8b3c5b3c3c295f7dbfa79045ace39142a307db600ababb42d90562b428c5e7b4",
     "common/inc/os-interface.h": "4849df93877a2a7dd020204be28237802646de7f419920f482adb9735a14484b",
@@ -40,6 +38,16 @@ STOCK_SHA256 = {
     "nvidia/nv.c":               "0648b6916ef56e7aed794c3182c0edf8e2202a29f373e3ed92f35a9b6f4f64c0",
     "conftest.sh":               "c71cc38b324c1be430d05177b60e11957db6fc472806d025c2483ffbf79fa3d4",
     "nvidia/nvidia.Kbuild":      "b506769bef3e343ac0c7a4750e1ab30bdc8963a3b5c1d450ab10041169c9f4ed",
+    # nvidia-uvm is open source in both the proprietary and open packages.
+    # These hashes come from NVIDIA's open-gpu-kernel-modules at 580.95.05
+    # (commit 2b43605): six of the nine files above match that release
+    # byte for byte, and the three that don't carry proprietary-only code.
+    "nvidia-uvm/uvm_gpu.c":            "149d4c343e3cc945132d209ef7bba0018dcd483ef60e4cf8ad46ddec025c0a25",
+    "nvidia-uvm/uvm_gpu.h":            "d30552079c49fc4ab5a2e437e8289ae3bc648a61a92a667c7c92d06f8f29633d",
+    "nvidia-uvm/uvm_mem.c":            "e98ce17dd9902f5a8b6cf8fb3919b3e85a4f82814029011af64c6e287a1d84d2",
+    "nvidia-uvm/uvm_mmu.c":            "e8451e8801c06d6ccafdb44f1c2540ea3c68703f7d2516584fac85324f1806d7",
+    "nvidia-uvm/uvm_pmm_sysmem.c":     "83d371c8395a5e1e36a18c8efcb0d9dabd93e4a6e29e7a0651aad4c4ba9e5932",
+    "nvidia-uvm/uvm_va_block.c":       "a9d219c0909246e680e33f4201823717a6383972adf92a79df28e43782ad66f5",
 }
 
 # ---------------------------------------------------------------------------
@@ -160,10 +168,6 @@ MODULE_PARM_DESC(arm_allow_host_register,
 
 static NvBool nv_arm_any_noncoherent_dev = NV_FALSE;
 static atomic_t nv_arm_forced_allocs = ATOMIC_INIT(0);
-/* First non-coherent GPU; used for cache maintenance on allocations that
- * have no device. Its reference is never dropped, so the struct device
- * outlives the module (harmless unless the GPU is hot-unplugged). */
-static struct device *nv_arm_flush_dev;
 
 NvBool nv_arm_is_noncoherent(nv_state_t *nv)
 {
@@ -183,14 +187,7 @@ void nv_arm_note_device(nv_state_t *nv)
 #if defined(NVCPU_AARCH64)
     NvBool nc = nv_arm_is_noncoherent(nv);
     if (nc)
-    {
-        /* kobject_get/put: get_device() is GPL-only, this module isn't */
-        struct device *dev = nv->dma_dev->dev;
         nv_arm_any_noncoherent_dev = NV_TRUE;
-        kobject_get(&dev->kobj);
-        if (cmpxchg(&nv_arm_flush_dev, NULL, dev) != NULL)
-            kobject_put(&dev->kobj);
-    }
     nv_printf(NV_DBG_ERRORS,
         "NVRM: arm64: %04x:%02x:%02x: DMA %s; sysmem %s, BAR WC %s\n",
         nv->pci_info.domain, nv->pci_info.bus, nv->pci_info.slot,
@@ -210,48 +207,43 @@ NvBool nv_arm_disable_iomap_wc(void)
 }
 
 /*
+ * Clean and invalidate [va, va + size) to the point of coherency with
+ * "dc civac", like the kernel's dcache_clean_inval_poc() (not exported).
+ * Doing it by address doesn't depend on a device, an IOMMU or swiotlb, any
+ * of which can make DMA-API cache maintenance miss the real pages. The
+ * stride is the smallest D-cache line this CPU reports, capped at 64 bytes
+ * so a big.LITTLE mix of line sizes can't make it skip lines.
+ */
+static void nv_arm_cpu_cache_flush(const void *va, size_t size)
+{
+#if defined(NVCPU_AARCH64)
+    unsigned long line = 4UL << ((read_cpuid_cachetype() >> 16) & 0xf);
+    unsigned long p, end = (unsigned long)va + size;
+
+    if (line > 64)
+        line = 64;
+    for (p = (unsigned long)va & ~(line - 1); p < end; p += line)
+        asm volatile("dc civac, %0" : : "r" (p) : "memory");
+    dsb(sy);
+#endif
+}
+
+/*
  * Write back the CPU cache lines covering a new uncached allocation. Its pages
  * were just zeroed (or last used) through the kernel's cacheable linear map.
  * If those dirty lines were evicted later, they would overwrite data already
- * written through the uncached alias. dma_map_page() on a non-coherent device
- * cleans the range to the point of coherency, which is all we need. (A
- * swiotlb-bounced mapping would not; on RK3588 the M10's 40-bit DMA mask
- * covers all of RAM, so that shouldn't happen.)
+ * written through the uncached alias.
  */
-static void nv_arm_clean_alloc(nv_alloc_t *at, struct device *dev)
+static void nv_arm_clean_alloc(nv_alloc_t *at)
 {
-#if defined(NVCPU_AARCH64)
-    NvU64 i, run;
+    NvU64 i;
 
-    if (dev == NULL)
-        dev = nv_arm_flush_dev;
-    if ((dev == NULL) || at->flags.coherent)
+    /* dma_alloc_coherent() memory is already handled by the kernel */
+    if (at->flags.coherent)
         return;
 
-    for (i = 0; i < at->num_pages; i += run)
-    {
-        NvU64 phys = at->page_table[i].phys_addr;
-        size_t size;
-        dma_addr_t dma;
-
-        /* One map/unmap per physically contiguous run */
-        for (run = 1; (i + run) < at->num_pages; run++)
-        {
-            if (at->page_table[i + run].phys_addr != phys + run * PAGE_SIZE)
-                break;
-        }
-        size = run * PAGE_SIZE;
-
-        dma = dma_map_page(dev, NV_GET_PAGE_STRUCT(phys), 0, size, DMA_TO_DEVICE);
-        if (dma_mapping_error(dev, dma))
-        {
-            printk_once(KERN_WARNING "NVRM: arm64: cache clean of new "
-                        "allocation failed; data corruption possible\n");
-            continue;
-        }
-        dma_unmap_page(dev, dma, size, DMA_TO_DEVICE);
-    }
-#endif
+    for (i = 0; i < at->num_pages; i++)
+        nv_arm_cpu_cache_flush(phys_to_virt(at->page_table[i].phys_addr), PAGE_SIZE);
 }
 
 """
@@ -275,7 +267,7 @@ NV_C_OVERRIDE = r"""#if defined(NVCPU_AARCH64)
 NV_C_CLEAN = r"""#if defined(NVCPU_AARCH64)
     /* M10/RK3588 port: see nv_arm_clean_alloc() */
     if ((at->cache_type != NV_MEMORY_CACHED) && nv_arm_is_noncoherent(nv))
-        nv_arm_clean_alloc(at, dev);
+        nv_arm_clean_alloc(at);
 #endif
 
 """
@@ -306,9 +298,9 @@ UVM_GPU_C_POLICY = r"""/*
  * UVM maps managed memory (cudaMallocManaged) and its own system memory
  * cacheable for the CPU and does no cache maintenance, assuming the GPU snoops
  * CPU caches. On hosts where it doesn't (e.g. RK3588), map them uncached
- * (Normal-NC) instead, as nvidia.ko does for RM memory. New pages are zeroed
- * through the cacheable linear map; the dma_map_page() in
- * uvm_gpu_map_cpu_pages() cleans them when they are mapped for the GPU.
+ * (Normal-NC) instead, as nvidia.ko does for RM memory. Pages are cleaned
+ * from the CPU cache when allocated and when mapped for a GPU, and around the
+ * kernel's own cached copies (uvm_arm_cpu_cache_flush()).
  */
 #if defined(NVCPU_AARCH64) && defined(NV_DEV_IS_DMA_COHERENT_PRESENT)
 #include <linux/dma-map-ops.h>
@@ -321,9 +313,34 @@ MODULE_PARM_DESC(uvm_arm_uncached_sysmem,
 
 static bool uvm_arm_any_noncoherent;
 
+bool uvm_arm_noncoherent(void)
+{
+    return READ_ONCE(uvm_arm_any_noncoherent);
+}
+
 bool uvm_arm_sysmem_uncached(void)
 {
-    return uvm_arm_uncached_sysmem && READ_ONCE(uvm_arm_any_noncoherent);
+    return uvm_arm_uncached_sysmem && uvm_arm_noncoherent();
+}
+
+// Clean and invalidate [va, va + size) to the point of coherency, like the
+// kernel's dcache_clean_inval_poc() (not exported). By address, so it doesn't
+// depend on swiotlb or an IOMMU. No-op on coherent hosts. The stride is capped
+// at 64 bytes so a big.LITTLE mix of line sizes can't make it skip lines.
+void uvm_arm_cpu_cache_flush(const void *va, size_t size)
+{
+#if defined(NVCPU_AARCH64)
+    unsigned long line = 4UL << ((read_cpuid_cachetype() >> 16) & 0xf);
+    unsigned long p, end = (unsigned long)va + size;
+
+    if (!uvm_arm_noncoherent())
+        return;
+    if (line > 64)
+        line = 64;
+    for (p = (unsigned long)va & ~(line - 1); p < end; p += line)
+        asm volatile("dc civac, %0" : : "r" (p) : "memory");
+    dsb(sy);
+#endif
 }
 
 static void uvm_arm_note_parent_gpu(uvm_parent_gpu_t *parent_gpu)
@@ -340,8 +357,10 @@ static void uvm_arm_note_parent_gpu(uvm_parent_gpu_t *parent_gpu)
 
 """
 
-UVM_GPU_H_DECL = """// M10/RK3588 port: true if UVM system memory must be mapped uncached
+UVM_GPU_H_DECL = """// M10/RK3588 port: non-coherent Arm helpers (uvm_gpu.c)
+bool uvm_arm_noncoherent(void);
 bool uvm_arm_sysmem_uncached(void);
+void uvm_arm_cpu_cache_flush(const void *va, size_t size);
 
 """
 
@@ -366,6 +385,40 @@ UVM_MEM_USER_FIX = r"""#if defined(NVCPU_AARCH64)
         vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 #endif
 
+"""
+
+UVM_MAP_FLUSH = r"""    // M10/RK3588 port: write back/discard CPU cache lines for pages the GPU
+    // is about to access directly (see uvm_arm_cpu_cache_flush())
+    uvm_arm_cpu_cache_flush(page_address(page), size);
+
+"""
+
+UVM_CHUNK_ALLOC_FLUSH = r"""        // M10/RK3588 port: don't leave dirty lines from zeroing behind
+        uvm_arm_cpu_cache_flush(page_address(page), alloc_size);
+"""
+
+# CPU-to-CPU page copy: drop stale lines before reading, write back after.
+UVM_CPU_COPY = r"""            uvm_arm_cpu_cache_flush(src_addr, PAGE_SIZE);   // M10/RK3588 port
+            memcpy(dst_addr, src_addr, PAGE_SIZE);
+            uvm_arm_cpu_cache_flush(dst_addr, PAGE_SIZE);
+"""
+
+UVM_WRITE_FROM_CPU = r"""        memcpy(mapped_page + page_offset, src, size);
+        uvm_arm_cpu_cache_flush(mapped_page + page_offset, size);   // M10/RK3588 port
+"""
+
+UVM_READ_TO_CPU = r"""        uvm_arm_cpu_cache_flush(mapped_page + page_offset, size);   // M10/RK3588 port
+        memcpy(dst, mapped_page + page_offset, size);
+"""
+
+# GPU page tables in sysmem written by the CPU must reach RAM before the GPU
+# walks them.
+UVM_PT_UNMAP = r"""    else {
+        // M10/RK3588 port: see uvm_arm_cpu_cache_flush()
+        if (phys_alloc->addr.aperture == UVM_APERTURE_SYS)
+            uvm_arm_cpu_cache_flush((void *)((unsigned long)ptr & PAGE_MASK), PAGE_SIZE);
+        kunmap(uvm_mmu_page_table_page(gpu, phys_alloc));
+    }
 """
 
 # ---------------------------------------------------------------------------
@@ -433,6 +486,26 @@ EDITS = [
      "    for (offset = 0; offset < uvm_mem_physical_size(mem); offset += PAGE_SIZE) {\n"
      "        int ret = vm_insert_page(",
      UVM_MEM_USER_FIX),
+    ("nvidia-uvm/uvm_gpu.c", "insert_before",
+     "    dma_addr = dma_map_page(&parent_gpu->pci_dev->dev, page, 0, size, DMA_BIDIRECTIONAL);\n",
+     UVM_MAP_FLUSH),
+    ("nvidia-uvm/uvm_pmm_sysmem.c", "insert_after",
+     "        if (alloc_flags & UVM_CPU_CHUNK_ALLOC_FLAGS_ZERO)\n"
+     "            SetPageDirty(page);\n",
+     UVM_CHUNK_ALLOC_FLUSH),
+    ("nvidia-uvm/uvm_va_block.c", "replace",
+     "            memcpy(dst_addr, src_addr, PAGE_SIZE);\n",
+     UVM_CPU_COPY),
+    ("nvidia-uvm/uvm_va_block.c", "replace",
+     "        memcpy(mapped_page + page_offset, src, size);\n",
+     UVM_WRITE_FROM_CPU),
+    ("nvidia-uvm/uvm_va_block.c", "replace",
+     "        memcpy(dst, mapped_page + page_offset, size);\n",
+     UVM_READ_TO_CPU),
+    ("nvidia-uvm/uvm_mmu.c", "replace",
+     "    else\n"
+     "        kunmap(uvm_mmu_page_table_page(gpu, phys_alloc));\n",
+     UVM_PT_UNMAP),
 ]
 
 # Files that must show the upstream non-coherent-arm-fixes before we apply.
@@ -472,6 +545,10 @@ def cmd_verify_stock(root):
         if got != want:
             bad.append(rel)
     if bad:
+        if all(rel.startswith("nvidia-uvm/") for rel in bad):
+            die("these nvidia-uvm files don't match the open 580.95.05 release "
+                "their hashes were taken from; please report them in an issue: "
+                + ", ".join(bad))
         die("these files don't match stock 580.95.05 aarch64: " + ", ".join(bad))
     print("m10-patcher: stock 580.95.05 aarch64 sources verified")
 
