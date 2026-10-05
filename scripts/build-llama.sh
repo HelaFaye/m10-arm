@@ -40,7 +40,14 @@ while [ $# -gt 0 ]; do
 done
 [ "$CUDA" = 1 ] || [ "$VULKAN" = 1 ] || CUDA=1
 DIR=${1:-$PWD/llama.cpp}
-JOBS=${JOBS:-$(nproc)}
+# One compile job per CPU can exhaust RAM: some of ggml's CUDA files need
+# ~2 GB each in nvcc. Default to the smaller of CPUs and (RAM + swap) / 2 GB.
+if [ -z "${JOBS:-}" ]; then
+    mem_gb=$(awk '/^(MemTotal|SwapTotal):/ { kb += $2 } END { print int(kb / 1048576) }' /proc/meminfo)
+    JOBS=$((mem_gb / 2))
+    [ "$JOBS" -ge 1 ] || JOBS=1
+    [ "$JOBS" -le "$(nproc)" ] || JOBS=$(nproc)
+fi
 
 for t in git cmake; do
     command -v $t >/dev/null || { echo "$t is required (apt install git cmake build-essential)"; exit 1; }

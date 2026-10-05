@@ -25,7 +25,11 @@ if [ "${1:-}" != "--test-only" ]; then
 
     echo ">> Adding NVIDIA CUDA apt repository (ubuntu2404/sbsa)"
     tmp=$(mktemp -d)
-    wget -q -O "$tmp/cuda-keyring.deb" "$REPO_URL/cuda-keyring_1.1-1_all.deb"
+    if command -v wget >/dev/null; then
+        wget -q -O "$tmp/cuda-keyring.deb" "$REPO_URL/cuda-keyring_1.1-1_all.deb"
+    else
+        curl -fsSL -o "$tmp/cuda-keyring.deb" "$REPO_URL/cuda-keyring_1.1-1_all.deb"
+    fi
     dpkg -i "$tmp/cuda-keyring.deb"
     rm -rf "$tmp"
 
@@ -52,6 +56,10 @@ NVCC=${NVCC:-$CUDA_HOME/bin/nvcc}
 
 echo ">> Building CUDA self-test for sm_50"
 OUT=$(mktemp -d)
-"$NVCC" -O2 -arch=sm_50 -o "$OUT/m10_cuda_selftest" "$HERE/tests/m10_cuda_selftest.cu"
+trap 'rm -rf "$OUT"' EXIT
+# CUDA 12.8+ warns on every sm_50 build that Maxwell is deprecated (it is
+# still supported); silence it so real errors stand out.
+"$NVCC" -O2 -arch=sm_50 -Wno-deprecated-gpu-targets \
+    -o "$OUT/m10_cuda_selftest" "$HERE/tests/m10_cuda_selftest.cu"
 echo ">> Running self-test (all GPUs)"
 "$OUT/m10_cuda_selftest"

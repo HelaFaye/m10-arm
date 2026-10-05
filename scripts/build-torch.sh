@@ -42,6 +42,9 @@ for t in git gcc g++ python3; do
     command -v $t >/dev/null || { echo "$t is required (sudo apt install git build-essential python3-dev python3-venv)"; exit 1; }
 done
 python3 -c 'import venv, ensurepip' 2>/dev/null || { echo "sudo apt install python3-venv python3-dev"; exit 1; }
+# Without a BLAS library PyTorch falls back to much slower CPU math kernels.
+ls /usr/lib/aarch64-linux-gnu/libopenblas.so >/dev/null 2>&1 ||
+    echo "!! OpenBLAS not found; CPU math will be slow. Recommended: sudo apt install libopenblas-dev"
 
 # ~1 job per 3 GB of RAM + swap: nvcc on PyTorch's CUDA files needs 2-3 GB each.
 if [ -z "${MAX_JOBS:-}" ]; then
@@ -50,8 +53,9 @@ if [ -z "${MAX_JOBS:-}" ]; then
     [ "$MAX_JOBS" -ge 1 ] || MAX_JOBS=1
     [ "$MAX_JOBS" -le "$(nproc)" ] || MAX_JOBS=$(nproc)
 fi
+mkdir -p "$(dirname "$SRC")"
 free_gb=$(df -Pk "$(dirname "$SRC")" | awk 'NR == 2 { print int($4 / 1048576) }')
-[ "$free_gb" -ge 40 ] || echo "!! Only ${free_gb} GB free here; a PyTorch build needs about 40 GB."
+[ "${free_gb:-0}" -ge 40 ] || echo "!! Only ${free_gb:-?} GB free here; a PyTorch build needs about 40 GB."
 
 # --- cuDNN: optional, faster convolutions (vision models). Only the pinned
 # version is used automatically, because newer cuDNN may not support Maxwell.
@@ -129,7 +133,7 @@ echo "   (this takes hours; the build directory is $SRC/build)"
 cd "$SRC"
 "$VENV/bin/python" -m pip wheel . --no-build-isolation --no-deps -w dist -v
 
-wheel=$(ls -t dist/torch-*.whl | head -1)
+wheel=$(ls -t dist/torch-*.whl | head -1)   # newest build
 echo ">> Installing $wheel into $VENV"
 "$VENV/bin/python" -m pip install --force-reinstall --no-deps "$wheel"
 "$VENV/bin/python" -m pip install "$wheel"   # its runtime dependencies

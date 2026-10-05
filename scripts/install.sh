@@ -35,7 +35,6 @@ KVER=$(uname -r)
 WORK=${WORK:-$PWD/NVIDIA-Linux-aarch64-580.95.05-m10}
 
 [ -f "$RUN" ] || { echo "No such file: $RUN"; exit 1; }
-[ "$(uname -m)" = aarch64 ] || { echo "Run this on the Arm board (aarch64)."; exit 1; }
 command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
 
 echo "!! This is untested work-in-progress code. Continue? [y/N]"
@@ -54,6 +53,8 @@ if [ "$PATCH_ONLY" = 1 ]; then
     exit 0
 fi
 
+# Patching works anywhere; installing only on the board itself.
+[ "$(uname -m)" = aarch64 ] || { echo "Run this on the Arm board (aarch64)."; exit 1; }
 [ "$(id -u)" = 0 ] || { echo "Installing needs root (sudo)."; exit 1; }
 [ -e "/lib/modules/$KVER/build/Makefile" ] || {
     echo "Kernel headers for $KVER missing. On Armbian install the linux-headers"
@@ -109,4 +110,4 @@ fi
 
 echo ">> Done. Then:"
 echo "     sudo update-initramfs -u && sudo reboot"
-echo "     sudo modprobe nvidia nvidia-uvm && sudo dmesg | grep -E 'NVRM|nvidia' && nvidia-smi"
+echo "     sudo modprobe -a nvidia nvidia-uvm && sudo dmesg | grep -E 'NVRM|nvidia' && nvidia-smi"

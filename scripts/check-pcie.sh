@@ -3,6 +3,8 @@
 # Pre-install check: are the M10's four GPUs and PCIe switch visible, with BARs assigned?
 # Run with sudo. Paste the output into an issue if anything looks wrong.
 
+[ "$(id -u)" = 0 ] || echo "!! Not root: lspci hides link status (LnkSta) and dmesg may be unreadable. Use sudo."
+
 echo "== PCIe tree"; lspci -tv
 echo; echo "== NVIDIA devices"
 lspci -nn -d 10de: || true

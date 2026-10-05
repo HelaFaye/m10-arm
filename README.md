@@ -2,7 +2,8 @@
 
 > [!WARNING]
 > **UNTESTED WORK IN PROGRESS.** None of this has run on real hardware yet.
-> It compiles against Linux 6.18 arm64, and that is all that has been verified.
+> The patched driver builds against Linux 6.18 arm64 and loads in an emulator
+> with no GPU attached (see "Tested so far"); nothing has touched an M10.
 > It loads a patched kernel module that can hang, crash or corrupt your
 > system. Use at your own risk, on a machine you can recover.
 
@@ -75,9 +76,10 @@ something besides `cudaHostRegister` needs that path: set
 | Patches apply to stock 580.95.05 aarch64 | ✅ real `.run`, all 15 pinned files sha256-verified |
 | `nvidia.ko` + `nvidia-uvm.ko` build and link against Linux 6.18 arm64 | ✅ cross-compiled, no unresolved or GPL-only symbols |
 | All functions the closed core imports resolve | ✅ |
-| Modules load in QEMU (arm64, Linux 6.18, no GPU) | ✅ `nvidia.ko` initialises and reports "No NVIDIA GPU found"; every symbol `nvidia-uvm.ko` lacks is exported by `nvidia.ko` |
+| `install.sh --patch-only` on the real `.run` | ✅ the patched tree it produces is the one built and loaded below |
+| Modules load in QEMU (arm64, Linux 6.18, no GPU) | ✅ `nvidia.ko` initialises and unloads cleanly three times, accepts all its new parameters, and reports "No NVIDIA GPU found"; every symbol `nvidia-uvm.ko` lacks is exported by `nvidia.ko` |
 | `nvidia-installer` options used by `install.sh` | ✅ checked against the real installer |
-| CUDA self-test compiles for sm_50 | ✅ (CUDA 12.9 `ptxas`) |
+| CUDA self-test compiles for sm_50 | ⚠️ did with CUDA 12.9 before the host-register and managed-memory tests were added; the current file is only syntax-checked (clang) |
 | Loads on an Orange Pi 5 Plus | ❌ not yet tried |
 | `nvidia-smi` sees 4× M10 | ❌ not yet tried |
 | CUDA self-test passes | ❌ not yet tried |
@@ -110,7 +112,7 @@ sudo scripts/install.sh ~/Downloads/NVIDIA-Linux-aarch64-580.95.05.run
 sudo update-initramfs -u && sudo reboot
 
 # 2. Check it
-sudo modprobe nvidia nvidia-uvm
+sudo modprobe -a nvidia nvidia-uvm
 sudo dmesg | grep -E 'NVRM|nvidia'   # expect: "DMA NON-coherent; sysmem forced uncached"
 nvidia-smi
 

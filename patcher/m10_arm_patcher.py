@@ -141,6 +141,10 @@ NV_C_POLICY = r"""/*
  * memory allocation flows through nv_alloc_pages(), and at->cache_type drives
  * all kernel/user mappings of it - so downgrade CACHED to UNCACHED there.
  */
+#if defined(NVCPU_AARCH64) && !defined(NV_DEV_IS_DMA_COHERENT_PRESENT)
+#warning "M10/RK3588 port: dev_is_dma_coherent() not found - non-coherent DMA can't be detected; set nvidia.arm_assume_noncoherent=1"
+#endif
+
 static int nv_arm_force_uncached = 1;
 module_param_named(arm_force_uncached, nv_arm_force_uncached, int, 0444);
 MODULE_PARM_DESC(arm_force_uncached,
@@ -164,6 +168,8 @@ MODULE_PARM_DESC(arm_allow_host_register,
 
 static NvBool nv_arm_any_noncoherent_dev = NV_FALSE;
 static atomic_t nv_arm_forced_allocs = ATOMIC_INIT(0);
+/* Smallest D-cache line across all CPUs, in bytes (0 = not measured yet) */
+static unsigned long nv_arm_dline;
 
 NvBool nv_arm_is_noncoherent(nv_state_t *nv)
 {
@@ -178,10 +184,44 @@ NvBool nv_arm_is_noncoherent(nv_state_t *nv)
 #endif
 }
 
+#if defined(NVCPU_AARCH64)
+static void nv_arm_dline_on_cpu(void *info)
+{
+    atomic_long_t *min = info;
+    long line = 4L << ((read_cpuid_cachetype() >> 16) & 0xf);
+    long cur = atomic_long_read(min);
+
+    while (line < cur)
+    {
+        long prev = atomic_long_cmpxchg(min, cur, line);
+        if (prev == cur)
+            break;
+        cur = prev;
+    }
+}
+#endif
+
 void nv_arm_note_device(nv_state_t *nv)
 {
 #if defined(NVCPU_AARCH64)
     NvBool nc = nv_arm_is_noncoherent(nv);
+
+    /*
+     * The kernel uses the smallest D-cache line across all CPUs for cache
+     * maintenance; its helpers for that are GPL-only, so ask every CPU here
+     * (probe runs in process context). RK3588's A55 and A76 both use 64.
+     */
+    if (READ_ONCE(nv_arm_dline) == 0)
+    {
+        atomic_long_t min = ATOMIC_LONG_INIT(LONG_MAX);
+        on_each_cpu(nv_arm_dline_on_cpu, &min, 1);
+        WRITE_ONCE(nv_arm_dline, atomic_long_read(&min));
+    }
+#if !defined(NV_DEV_IS_DMA_COHERENT_PRESENT)
+    if (nv_arm_assume_noncoherent < 0)
+        nv_printf(NV_DBG_ERRORS, "NVRM: arm64: kernel can't report DMA coherency; "
+                  "assuming coherent. On RK3588 set nvidia.arm_assume_noncoherent=1\n");
+#endif
     if (nc)
         nv_arm_any_noncoherent_dev = NV_TRUE;
     nv_printf(NV_DBG_ERRORS,
@@ -207,17 +247,17 @@ NvBool nv_arm_disable_iomap_wc(void)
  * "dc civac", like the kernel's dcache_clean_inval_poc() (not exported).
  * Doing it by address doesn't depend on a device, an IOMMU or swiotlb, any
  * of which can make DMA-API cache maintenance miss the real pages. The
- * stride is the smallest D-cache line this CPU reports, capped at 64 bytes
- * so a big.LITTLE mix of line sizes can't make it skip lines.
+ * stride is the smallest D-cache line across all CPUs, measured at probe;
+ * before the first probe, this CPU's own line size is used.
  */
 static void nv_arm_cpu_cache_flush(const void *va, size_t size)
 {
 #if defined(NVCPU_AARCH64)
-    unsigned long line = 4UL << ((read_cpuid_cachetype() >> 16) & 0xf);
+    unsigned long line = READ_ONCE(nv_arm_dline);
     unsigned long p, end = (unsigned long)va + size;
 
-    if (line > 64)
-        line = 64;
+    if (line == 0)
+        line = 4UL << ((read_cpuid_cachetype() >> 16) & 0xf);
     for (p = (unsigned long)va & ~(line - 1); p < end; p += line)
         asm volatile("dc civac, %0" : : "r" (p) : "memory");
     dsb(sy);
@@ -300,6 +340,11 @@ UVM_GPU_C_POLICY = r"""/*
  */
 #if defined(NVCPU_AARCH64) && defined(NV_DEV_IS_DMA_COHERENT_PRESENT)
 #include <linux/dma-map-ops.h>
+#elif defined(NVCPU_AARCH64)
+#warning "M10/RK3588 port: dev_is_dma_coherent() not found - UVM can't detect non-coherent DMA and stays cached"
+#endif
+#if defined(NVCPU_AARCH64)
+#include <asm/cpufeature.h>
 #endif
 
 static int uvm_arm_uncached_sysmem = 1;
@@ -308,6 +353,8 @@ MODULE_PARM_DESC(uvm_arm_uncached_sysmem,
     "arm64: map UVM system memory uncached on non-DMA-coherent hosts (default 1)");
 
 static bool uvm_arm_any_noncoherent;
+// Smallest D-cache line across all CPUs, in bytes (0 = not read yet)
+static unsigned long uvm_arm_dline;
 
 bool uvm_arm_noncoherent(void)
 {
@@ -321,18 +368,18 @@ bool uvm_arm_sysmem_uncached(void)
 
 // Clean and invalidate [va, va + size) to the point of coherency, like the
 // kernel's dcache_clean_inval_poc() (not exported). By address, so it doesn't
-// depend on swiotlb or an IOMMU. No-op on coherent hosts. The stride is capped
-// at 64 bytes so a big.LITTLE mix of line sizes can't make it skip lines.
+// depend on swiotlb or an IOMMU. No-op on coherent hosts. The stride is the
+// smallest D-cache line across all CPUs (the kernel's sanitised CTR_EL0).
 void uvm_arm_cpu_cache_flush(const void *va, size_t size)
 {
 #if defined(NVCPU_AARCH64)
-    unsigned long line = 4UL << ((read_cpuid_cachetype() >> 16) & 0xf);
+    unsigned long line = READ_ONCE(uvm_arm_dline);
     unsigned long p, end = (unsigned long)va + size;
 
     if (!uvm_arm_noncoherent())
         return;
-    if (line > 64)
-        line = 64;
+    if (line == 0)
+        line = 4UL << ((read_cpuid_cachetype() >> 16) & 0xf);
     for (p = (unsigned long)va & ~(line - 1); p < end; p += line)
         asm volatile("dc civac, %0" : : "r" (p) : "memory");
     dsb(sy);
@@ -341,6 +388,11 @@ void uvm_arm_cpu_cache_flush(const void *va, size_t size)
 
 static void uvm_arm_note_parent_gpu(uvm_parent_gpu_t *parent_gpu)
 {
+#if defined(NVCPU_AARCH64)
+    // Set before uvm_arm_any_noncoherent, which enables the flushes
+    if (READ_ONCE(uvm_arm_dline) == 0)
+        WRITE_ONCE(uvm_arm_dline, 4UL << ((read_sanitised_ftr_reg(SYS_CTR_EL0) >> 16) & 0xf));
+#endif
 #if defined(NVCPU_AARCH64) && defined(NV_DEV_IS_DMA_COHERENT_PRESENT)
     if ((parent_gpu->pci_dev != NULL) && !dev_is_dma_coherent(&parent_gpu->pci_dev->dev)) {
         WRITE_ONCE(uvm_arm_any_noncoherent, true);
@@ -541,10 +593,6 @@ def cmd_verify_stock(root):
         if got != want:
             bad.append(rel)
     if bad:
-        if all(rel.startswith("nvidia-uvm/") for rel in bad):
-            die("these nvidia-uvm files don't match the open 580.95.05 release "
-                "their hashes were taken from; please report them in an issue: "
-                + ", ".join(bad))
         die("these files don't match stock 580.95.05 aarch64: " + ", ".join(bad))
     print("m10-patcher: stock 580.95.05 aarch64 sources verified")
 
@@ -566,6 +614,11 @@ def apply_edit(text, kind, anchor, payload, rel):
         ipos = text.find(inner, fpos)
         if ipos < 0:
             die("%s: inner anchor not found after function anchor" % rel)
+        # Must be inside that function: before its closing brace
+        fend = text.find("\n}\n", fpos)
+        if fend >= 0 and ipos > fend:
+            die("%s: inner anchor %r is past the end of %r"
+                % (rel, inner[:40], func.strip()))
         return text[:ipos] + payload + text[ipos:]
 
     n = text.count(anchor)

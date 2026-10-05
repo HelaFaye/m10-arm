@@ -15,7 +15,6 @@ set -eu
 
 KDIR=${1:?usage: $0 <driver>/kernel}
 REPO=https://github.com/mariobalanica/open-gpu-kernel-modules
-BRANCH=non-coherent-arm-fixes
 BASE=2b436058a616676ec888ef3814d1db6b2220f2eb   # NVIDIA 580.95.05
 HEAD=10072734b2f88f3580cdb036778ec27d2b4f2fb9   # "Fix cached DMA allocations on non-coherent hardware"
 
@@ -30,11 +29,14 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-echo ">> Fetching $REPO ($BRANCH)"
-git clone -q --filter=blob:none --no-checkout "$REPO" "$TMP/ogkm"
-git -C "$TMP/ogkm" fetch -q origin "$BRANCH"
+# Fetch just the two pinned commits by ID: faster than cloning the history,
+# and still works if the upstream branch is later rebased or deleted.
+echo ">> Fetching pinned commits from $REPO"
+git init -q "$TMP/ogkm"
+git -C "$TMP/ogkm" remote add origin "$REPO"
 for c in "$BASE" "$HEAD"; do
-    git -C "$TMP/ogkm" cat-file -e "$c^{commit}" 2>/dev/null || { echo "pinned commit $c not found"; exit 1; }
+    git -C "$TMP/ogkm" fetch -q --depth 1 origin "$c" ||
+        { echo "pinned commit $c not available from $REPO"; exit 1; }
 done
 
 git -C "$TMP/ogkm" diff "$BASE" "$HEAD" -- kernel-open \
