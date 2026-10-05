@@ -170,7 +170,14 @@ hours** on the RK3588, about 40 GB of disk, and plenty of RAM plus swap
 - **cuDNN** speeds up convolutions (vision models). The build uses it only if
   version 9.10.2.21 is installed, the version upstream ships with its Maxwell
   builds; newer releases may have dropped Maxwell. Without it, convolutions use
-  slower native kernels.
+  slower native kernels. Install it before building, from the repository
+  `setup-cuda.sh` adds:
+
+  ```sh
+  sudo apt install libcudnn9-cuda-12=9.10.2.21-1 libcudnn9-headers-cuda-12=9.10.2.21-1 \
+                   libcudnn9-dev-cuda-12=9.10.2.21-1
+  sudo apt-mark hold libcudnn9-cuda-12 libcudnn9-headers-cuda-12 libcudnn9-dev-cuda-12
+  ```
 - **Off in this build:** flash and memory-efficient attention (they need newer
   GPUs; `scaled_dot_product_attention` falls back to its math kernel), NCCL
   (set `WITH_NCCL=1` to try it; multi-GPU still works through gloo), and

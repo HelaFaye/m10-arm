@@ -55,9 +55,12 @@ free_gb=$(df -Pk "$(dirname "$SRC")" | awk 'NR == 2 { print int($4 / 1048576) }'
 
 # --- cuDNN: optional, faster convolutions (vision models). Only the pinned
 # version is used automatically, because newer cuDNN may not support Maxwell.
-# NVIDIA's apt repo (added by setup-cuda.sh) should have it as:
-#   sudo apt install libcudnn9-cuda-12=$CUDNN_VERSION-1 libcudnn9-dev-cuda-12=$CUDNN_VERSION-1
-# (package version string unverified - check `apt policy libcudnn9-dev-cuda-12`).
+# NVIDIA's sbsa apt repo (added by setup-cuda.sh) has it; the dev package
+# requires the runtime and headers packages at exactly the same version, so
+# all three must be named, and held so an upgrade can't replace them.
+CUDNN_PKGS="libcudnn9-cuda-12 libcudnn9-headers-cuda-12 libcudnn9-dev-cuda-12"
+CUDNN_APT=""
+for p in $CUDNN_PKGS; do CUDNN_APT="$CUDNN_APT $p=$CUDNN_VERSION-1"; done
 cudnn_have=$(dpkg-query -W -f='${Version}' libcudnn9-dev-cuda-12 2>/dev/null || true)
 case $WITH_CUDNN in
     1) USE_CUDNN=1 ;;
@@ -67,13 +70,21 @@ case $WITH_CUDNN in
             "$CUDNN_VERSION"*) USE_CUDNN=1 ;;
             "") USE_CUDNN=0
                 echo "!! cuDNN not installed; building without it (convolutions use slower native kernels)."
-                echo "   To use it: sudo apt install libcudnn9-cuda-12=$CUDNN_VERSION-1 libcudnn9-dev-cuda-12=$CUDNN_VERSION-1" ;;
+                echo "   To use it: sudo apt install$CUDNN_APT && sudo apt-mark hold $CUDNN_PKGS" ;;
             *)  USE_CUDNN=0
                 echo "!! cuDNN $cudnn_have is installed, not $CUDNN_VERSION; it may not support Maxwell,"
                 echo "   so building without cuDNN. WITH_CUDNN=1 uses it anyway." ;;
         esac ;;
     *) echo "WITH_CUDNN must be auto, 1 or 0"; exit 2 ;;
 esac
+# Tell CMake exactly where the headers package put cudnn.h
+if [ "$USE_CUDNN" = 1 ]; then
+    cudnn_h=$(dpkg -L libcudnn9-headers-cuda-12 2>/dev/null | grep '/cudnn\.h$' | head -1 || true)
+    if [ -n "$cudnn_h" ]; then
+        CUDNN_INCLUDE_DIR=$(dirname "$cudnn_h")
+        export CUDNN_INCLUDE_DIR
+    fi
+fi
 
 # --- Source at the pinned tag
 if [ ! -d "$SRC/.git" ]; then
