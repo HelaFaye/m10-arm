@@ -72,10 +72,11 @@ something besides `cudaHostRegister` needs that path: set
 
 | | Status |
 |---|---|
-| Patches apply to stock 580.95.05 aarch64 | ✅ (sha256-verified input) |
-| Module builds against Linux 6.18.52 arm64 | ✅ cross-compiled (before the host-register, cache-clean and UVM changes) |
-| Current patches compile against Linux 6.18 arm64 | ⚠️ only on NVIDIA's open-module sources at the same version, as a stand-in |
+| Patches apply to stock 580.95.05 aarch64 | ✅ real `.run`, all 15 pinned files sha256-verified |
+| `nvidia.ko` + `nvidia-uvm.ko` build and link against Linux 6.18 arm64 | ✅ cross-compiled, no unresolved or GPL-only symbols |
 | All functions the closed core imports resolve | ✅ |
+| Modules load in QEMU (arm64, Linux 6.18, no GPU) | ✅ `nvidia.ko` initialises and reports "No NVIDIA GPU found"; every symbol `nvidia-uvm.ko` lacks is exported by `nvidia.ko` |
+| `nvidia-installer` options used by `install.sh` | ✅ checked against the real installer |
 | CUDA self-test compiles for sm_50 | ✅ (CUDA 12.9 `ptxas`) |
 | Loads on an Orange Pi 5 Plus | ❌ not yet tried |
 | `nvidia-smi` sees 4× M10 | ❌ not yet tried |
