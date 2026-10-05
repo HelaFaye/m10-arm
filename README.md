@@ -79,7 +79,7 @@ something besides `cudaHostRegister` needs that path: set
 | `install.sh --patch-only` on the real `.run` | ✅ the patched tree it produces is the one built and loaded below |
 | Modules load in QEMU (arm64, Linux 6.18, no GPU) | ✅ `nvidia.ko` initialises and unloads cleanly three times, accepts all its new parameters, and reports "No NVIDIA GPU found"; every symbol `nvidia-uvm.ko` lacks is exported by `nvidia.ko` |
 | `nvidia-installer` options used by `install.sh` | ✅ checked against the real installer |
-| CUDA self-test compiles for sm_50 | ⚠️ did with CUDA 12.9 before the host-register and managed-memory tests were added; the current file is only syntax-checked (clang) |
+| CUDA self-test compiles for sm_50 | ✅ current file, CUDA 12.9 `nvcc` (12.9.86), no warnings with `-Wall -Wextra`; binary contains sm_50 code and exits cleanly with no driver |
 | Loads on an Orange Pi 5 Plus | ❌ not yet tried |
 | `nvidia-smi` sees 4× M10 | ❌ not yet tried |
 | CUDA self-test passes | ❌ not yet tried |

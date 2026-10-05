@@ -110,7 +110,10 @@ run_tests() {   # run_tests <name>
 
 FAILED=""
 if [ "$CUDA" = 1 ]; then
+    # ggml looks the toolkit up separately from the compiler; without
+    # CUDAToolkit_ROOT it only searches PATH and /usr/local/cuda.
     build cuda -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=50 \
+        -DCUDAToolkit_ROOT="$CUDA_HOME" \
         -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc"
     run_tests cuda || FAILED="$FAILED cuda"
 fi
