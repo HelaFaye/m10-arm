@@ -38,12 +38,8 @@ STOCK_SHA256 = {
     "nvidia/nv.c":               "0648b6916ef56e7aed794c3182c0edf8e2202a29f373e3ed92f35a9b6f4f64c0",
     "conftest.sh":               "c71cc38b324c1be430d05177b60e11957db6fc472806d025c2483ffbf79fa3d4",
     "nvidia/nvidia.Kbuild":      "b506769bef3e343ac0c7a4750e1ab30bdc8963a3b5c1d450ab10041169c9f4ed",
-    # nvidia-uvm is open source in both the proprietary and open packages.
-    # These hashes come from NVIDIA's open-gpu-kernel-modules at 580.95.05
-    # (commit 2b43605): six of the nine files above match that release
-    # byte for byte, and the three that don't carry proprietary-only code.
     "nvidia-uvm/uvm_gpu.c":            "149d4c343e3cc945132d209ef7bba0018dcd483ef60e4cf8ad46ddec025c0a25",
-    "nvidia-uvm/uvm_gpu.h":            "d30552079c49fc4ab5a2e437e8289ae3bc648a61a92a667c7c92d06f8f29633d",
+    "nvidia-uvm/uvm_gpu.h":            "16425844dd63907dfc3e92526618b258a730ccf5188b46273bd79f47903ebece",
     "nvidia-uvm/uvm_mem.c":            "e98ce17dd9902f5a8b6cf8fb3919b3e85a4f82814029011af64c6e287a1d84d2",
     "nvidia-uvm/uvm_mmu.c":            "e8451e8801c06d6ccafdb44f1c2540ea3c68703f7d2516584fac85324f1806d7",
     "nvidia-uvm/uvm_pmm_sysmem.c":     "83d371c8395a5e1e36a18c8efcb0d9dabd93e4a6e29e7a0651aad4c4ba9e5932",
