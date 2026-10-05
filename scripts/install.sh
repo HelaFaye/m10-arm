@@ -9,12 +9,26 @@
 # You must supply NVIDIA's installer yourself:
 #   NVIDIA-Linux-aarch64-580.95.05.run
 #
-#   sudo scripts/install.sh [--patch-only] /path/to/NVIDIA-Linux-aarch64-580.95.05.run
+#   sudo scripts/install.sh [--patch-only] [--with-vulkan] /path/to/NVIDIA-Linux-aarch64-580.95.05.run
+#
+# --with-vulkan also installs NVIDIA's GL/Vulkan user-space libraries, which
+# its Vulkan driver lives in. Ubuntu's libglvnd is kept, and NVIDIA's EGL
+# vendor file is disabled so the desktop keeps using Mesa (Mali) for EGL.
 set -eu
 
+USAGE="usage: sudo $0 [--patch-only] [--with-vulkan] /path/to/NVIDIA-Linux-aarch64-580.95.05.run"
 PATCH_ONLY=0
-if [ "${1:-}" = "--patch-only" ]; then PATCH_ONLY=1; shift; fi
-RUN=${1:?usage: sudo $0 [--patch-only] /path/to/NVIDIA-Linux-aarch64-580.95.05.run}
+VULKAN=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --patch-only) PATCH_ONLY=1 ;;
+        --with-vulkan) VULKAN=1 ;;
+        -*) echo "$USAGE"; exit 2 ;;
+        *) break ;;
+    esac
+    shift
+done
+RUN=${1:?$USAGE}
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 KVER=$(uname -r)
@@ -52,19 +66,46 @@ blacklist nouveau
 options nouveau modeset=0
 B
 
-# --no-opengl-files : keep Mesa (Mali/panthor) GL/EGL for the desktop
-# --no-drm          : the M10 has no display outputs; skip nvidia-drm
+# --no-opengl-files     : keep Mesa (Mali/panthor) GL/EGL for the desktop. This
+#                         also leaves out NVIDIA's Vulkan driver, which ships
+#                         in the same libraries.
+# --no-install-libglvnd : with --with-vulkan, keep Ubuntu's libglvnd dispatch
+#                         libraries rather than replacing them.
+# --no-drm              : the M10 has no display outputs; skip nvidia-drm
 # libcuda, nvidia-smi and the nvidia-uvm module (needed by CUDA) are installed.
+if [ "$VULKAN" = 1 ]; then
+    [ -e /usr/lib/aarch64-linux-gnu/libGLdispatch.so.0 ] || {
+        echo "--with-vulkan needs Ubuntu's libglvnd: sudo apt install libglvnd0"
+        exit 1; }
+    GL_OPT=--no-install-libglvnd
+else
+    GL_OPT=--no-opengl-files
+fi
+
 echo ">> Running nvidia-installer"
 cd "$WORK"
 ./nvidia-installer \
     --kernel-module-type=proprietary \
-    --no-opengl-files \
+    "$GL_OPT" \
     --no-drm \
     --no-x-check \
     --no-nouveau-check \
     --skip-module-load \
     --ui=none --no-questions --accept-license
+
+if [ "$VULKAN" = 1 ]; then
+    # glvnd tries EGL vendors in file-name order, so NVIDIA's 10_nvidia.json
+    # would come before Mesa's 50_mesa.json for every desktop EGL app. The M10
+    # drives no display, so turn it off. Vulkan doesn't use EGL.
+    for f in /usr/share/glvnd/egl_vendor.d/10_nvidia.json \
+             /etc/glvnd/egl_vendor.d/10_nvidia.json; do
+        if [ -e "$f" ]; then
+            mv "$f" "$f.disabled-by-m10-arm"
+            echo ">> Disabled NVIDIA EGL vendor: $f"
+        fi
+    done
+    echo ">> Vulkan installed. After reboot: scripts/check-vulkan.sh"
+fi
 
 echo ">> Done. Then:"
 echo "     sudo update-initramfs -u && sudo reboot"

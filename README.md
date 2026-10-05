@@ -80,6 +80,10 @@ something besides `cudaHostRegister` needs that path: set
 | Loads on an Orange Pi 5 Plus | ❌ not yet tried |
 | `nvidia-smi` sees 4× M10 | ❌ not yet tried |
 | CUDA self-test passes | ❌ not yet tried |
+| `build-llama.sh` fetches, builds and tests | ✅ Vulkan path on x86 with a software Vulkan device; CUDA path not built (no `nvcc` here) |
+| `torch_selftest.py` logic | ✅ passes against the CPU with stock PyTorch 2.14 |
+| Vulkan sees 4× M10 | ❌ not yet tried |
+| PyTorch builds for sm_50 on aarch64 | ❌ not yet tried |
 
 ## Requirements
 
@@ -100,6 +104,8 @@ sudo scripts/check-pcie.sh
 # 1. Patch + install the driver
 sudo apt install build-essential git patch python3 linux-headers-<your-armbian-kernel-flavour>
 sudo scripts/install.sh ~/Downloads/NVIDIA-Linux-aarch64-580.95.05.run
+#    ...or, to also get NVIDIA's Vulkan driver (see "Vulkan" below):
+# sudo scripts/install.sh --with-vulkan ~/Downloads/NVIDIA-Linux-aarch64-580.95.05.run
 sudo update-initramfs -u && sudo reboot
 
 # 2. Check it
@@ -117,11 +123,58 @@ To only produce a patched driver tree without installing anything:
 ### Using CUDA
 
 The driver's `libcuda` and `nvidia-uvm` come from your `.run`. Use **CUDA 12.9**:
-13.x can't build for Maxwell. For llama.cpp:
+13.x can't build for Maxwell.
+
+### llama.cpp
 
 ```sh
-cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=50 && cmake --build build -j8
+scripts/build-llama.sh                 # CUDA build in ./llama.cpp, then a quick GPU-vs-CPU check
+scripts/build-llama.sh --vulkan        # Vulkan build (needs the Vulkan steps below)
+scripts/build-llama.sh --cuda --vulkan --full-test
 ```
+
+The script builds a pinned llama.cpp commit for sm_50 and runs ggml's
+`test-backend-ops`, which compares each GPU's results with the CPU. It fails if
+any result differs or if fewer than four GPUs were tested. Then run a model
+across all four GPUs with `-ngl 99 --split-mode layer`.
+
+### Vulkan
+
+```sh
+sudo apt install vulkan-tools libvulkan-dev glslc spirv-headers libglvnd0
+sudo scripts/install.sh --with-vulkan ~/Downloads/NVIDIA-Linux-aarch64-580.95.05.run
+sudo reboot
+scripts/check-vulkan.sh                # expects 4 Tesla M10 Vulkan devices
+scripts/build-llama.sh --vulkan
+```
+
+NVIDIA's Vulkan driver ships inside its GL libraries, which a plain install leaves
+out to protect the Mali desktop. `--with-vulkan` installs them but keeps Ubuntu's
+libglvnd and disables NVIDIA's EGL vendor file, so desktop apps keep using Mesa.
+
+### PyTorch
+
+```sh
+sudo apt install python3-dev python3-venv
+scripts/build-torch.sh                 # source in ./pytorch, virtualenv in ./torch-venv
+. torch-venv/bin/activate
+python tests/torch_selftest.py         # also run at the end of the build
+```
+
+No prebuilt PyTorch wheel runs on this setup: the aarch64 CUDA wheels are built
+only for newer GPUs. The script builds PyTorch v2.14.1 from source for sm_50,
+which upstream still compiles for in its x86 CUDA 12.6 wheels. Expect **many
+hours** on the RK3588, about 40 GB of disk, and plenty of RAM plus swap
+(`MAX_JOBS` is set from RAM + swap).
+
+- **cuDNN** speeds up convolutions (vision models). The build uses it only if
+  version 9.10.2.21 is installed, the version upstream ships with its Maxwell
+  builds; newer releases may have dropped Maxwell. Without it, convolutions use
+  slower native kernels.
+- **Off in this build:** flash and memory-efficient attention (they need newer
+  GPUs; `scaled_dot_product_attention` falls back to its math kernel), NCCL
+  (set `WITH_NCCL=1` to try it; multi-GPU still works through gloo), and
+  `torch.compile`'s GPU code generation, which targets newer GPUs. Use eager mode.
 
 ## Known risks
 
@@ -137,6 +190,9 @@ cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=50 && cmake --build bui
   a GPU. That's independent of swiotlb and the IOMMU, but large allocations take
   longer to set up.
 - **Performance** is modest: each GM107 has 8 GB at ~83 GB/s, no fast FP16 and no `dp4a`.
+- **Vulkan next to the Mali desktop** is untested. If the desktop misbehaves after
+  `--with-vulkan`, reinstall without it. `install.sh` renames NVIDIA's EGL vendor
+  file to `*.disabled-by-m10-arm`; check nothing else from NVIDIA took over GL.
 
 ## Reporting results
 
