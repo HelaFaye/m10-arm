@@ -77,7 +77,9 @@ case $WITH_CUDNN in
         esac ;;
     *) echo "WITH_CUDNN must be auto, 1 or 0"; exit 2 ;;
 esac
-# Tell CMake exactly where the headers package put cudnn.h
+# Tell CMake exactly where the headers package put cudnn.h. For the sbsa
+# 9.10.2.21-1 package that's /usr/include/aarch64-linux-gnu, where cudnn.h
+# and cudnn_version.h are links to the *_v9.h headers.
 if [ "$USE_CUDNN" = 1 ]; then
     cudnn_h=$(dpkg -L libcudnn9-headers-cuda-12 2>/dev/null | grep '/cudnn\.h$' | head -1 || true)
     if [ -n "$cudnn_h" ]; then
