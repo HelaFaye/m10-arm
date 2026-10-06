@@ -83,7 +83,7 @@ something besides `cudaHostRegister` needs that path: set
 | Loads on an Orange Pi 5 Plus | ❌ not yet tried |
 | `nvidia-smi` sees 4× M10 | ❌ not yet tried |
 | CUDA self-test passes | ❌ not yet tried |
-| `build-llama.sh` fetches, builds and tests | ✅ Vulkan path on x86 with a software Vulkan device; CUDA path not built (no `nvcc` here) |
+| `build-llama.sh` fetches, builds and tests | ✅ Vulkan path on x86 with a software Vulkan device; CUDA path fully built with CUDA 12.9 (all 144 CUDA files for sm_50 only), linked against the toolkit's stub `libcuda`; the test step correctly fails with no GPU |
 | `torch_selftest.py` logic | ✅ passes against the CPU with stock PyTorch 2.14 |
 | Vulkan sees 4× M10 | ❌ not yet tried |
 | PyTorch builds for sm_50 on aarch64 | ❌ not yet tried |

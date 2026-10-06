@@ -56,6 +56,12 @@ if [ "$CUDA" = 1 ] && [ ! -x "$CUDA_HOME/bin/nvcc" ]; then
     echo "nvcc not found in $CUDA_HOME - run scripts/setup-cuda.sh first (or set CUDA_HOME)"
     exit 1
 fi
+# ggml-cuda links libcuda.so.1 directly, and that comes with the driver,
+# not the toolkit - without it, linking fails with undefined cu* symbols.
+if [ "$CUDA" = 1 ] && ! ldconfig -p 2>/dev/null | grep -q 'libcuda\.so\.1 '; then
+    echo "libcuda.so.1 not found - install the patched driver first (scripts/install.sh)"
+    exit 1
+fi
 if [ "$VULKAN" = 1 ]; then
     if ! command -v glslc >/dev/null || [ ! -e /usr/include/vulkan/vulkan.h ] ||
        [ ! -d /usr/include/spirv ]; then
