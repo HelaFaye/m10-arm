@@ -110,6 +110,11 @@ run_tests() {   # run_tests <name>
 
 FAILED=""
 if [ "$CUDA" = 1 ]; then
+    # Linking the tools against libggml-cuda.so needs CUDA's own library dir
+    # on the search path (libcudart.so.12); don't rely on the shell having
+    # picked up setup-cuda.sh's /etc/profile.d entry yet.
+    LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH
     # ggml looks the toolkit up separately from the compiler; without
     # CUDAToolkit_ROOT it only searches PATH and /usr/local/cuda.
     build cuda -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=50 \
