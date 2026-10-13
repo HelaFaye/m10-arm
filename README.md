@@ -87,6 +87,7 @@ something besides `cudaHostRegister` needs that path: set
 | `torch_selftest.py` logic | ✅ passes against the CPU with stock PyTorch 2.14 |
 | Vulkan sees 4× M10 | ❌ not yet tried |
 | PyTorch builds for sm_50 on aarch64 | ❌ not yet tried |
+| `hw-test.sh` logic | ✅ against mock hardware: healthy run, missing GPU and unassigned BARs, wrong data, an Xid in one stage, op and perplexity mismatches, overheating mid-test, a previous crashed run, coherent DMA, unpatched driver, missing tools |
 
 ## Requirements
 
@@ -204,10 +205,46 @@ hours** on the RK3588, about 40 GB of disk, and plenty of RAM plus swap
   `--with-vulkan`, reinstall without it. `install.sh` renames NVIDIA's EGL vendor
   file to `*.disabled-by-m10-arm`; check nothing else from NVIDIA took over GL.
 
+## Automatic hardware test
+
+Once everything is installed, one command checks the whole stack on the board
+and writes a report:
+
+```sh
+sudo scripts/hw-test.sh                               # quick run
+sudo scripts/hw-test.sh --full --soak 60 --model ~/models/small.gguf
+```
+
+| Stage | What it checks |
+|---|---|
+| PCIe | 4 GPUs present, no unassigned BARs, link speed and width |
+| Driver | patched modules loaded, every GPU reported as non-coherent |
+| `nvidia-smi` | 4× Tesla M10 visible |
+| CUDA self-test | all GPUs; all four at once; several buffer sizes |
+| Vulkan | 4 Vulkan devices (skipped without `--with-vulkan`) |
+| llama.cpp | `test-backend-ops` on every GPU against the CPU |
+| Model | with `--model`: perplexity on all GPUs and on one GPU must match the CPU within 2% |
+| PyTorch | `torch_selftest.py` (skipped without `build-torch.sh`) |
+| Module reload | with `--full`: unload and reload the driver 3 times |
+| Soak | with `--soak MINUTES`: repeat the CUDA self-test |
+
+- **Kernel errors fail the stage that caused them.** It marks each stage in the
+  kernel log; an `Xid`, oops, SError or "fallen off the bus" after the marker
+  fails that stage.
+- **Overheating:** a watchdog logs GPU temperatures every 10 s. Above
+  `TEMP_LIMIT` (default 85 °C) it stops the running GPU test and skips the
+  remaining ones. The M10 needs forced airflow.
+- **Crashes:** the current stage is saved to disk first. If the board hangs or
+  reboots, the next run says which stage it died in.
+- **Report:** `m10-test-results/<date>.tar.gz` holds every log, the kernel log,
+  `nvidia-smi -q` and the temperatures. Stages whose prerequisite isn't
+  installed are skipped, not failed. Exit status is 0 only if nothing failed.
+
 ## Reporting results
 
-Please open an issue with: `sudo scripts/check-pcie.sh`, full `sudo dmesg` after
-`modprobe nvidia`, `nvidia-smi -q`, and the self-test output.
+Please open an issue with the `.tar.gz` report from `sudo scripts/hw-test.sh`. If
+the driver doesn't get that far, attach `sudo scripts/check-pcie.sh` and the full
+`sudo dmesg` after `modprobe nvidia` instead.
 
 ## Credits
 

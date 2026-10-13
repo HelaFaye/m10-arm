@@ -5,3 +5,5 @@ NVIDIA-Linux-*/
 *.o
 m10_cuda_selftest
 __pycache__/
+# hw-test.sh reports
+m10-test-results/
