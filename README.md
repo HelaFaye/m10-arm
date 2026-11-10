@@ -90,6 +90,9 @@ nvidia-smi
 sudo scripts/setup-cuda.sh
 ```
 
+To share the M10 with an LXC container on Proxmox, see
+[`docs/PROXMOX.md`](docs/PROXMOX.md). A VM can't be given the card on RK3588.
+
 To only produce a patched driver tree without installing anything:
 `scripts/install.sh --patch-only <file.run>`.
 
