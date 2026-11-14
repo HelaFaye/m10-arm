@@ -50,7 +50,7 @@ mkcpus "$RK" "0xd05 414 $V82" "0xd05 414 $V82" "0xd05 414 $V82" "0xd05 414 $V82"
 
 run "RK3588: clusters, arch, thread flags" 0 "$RK" -- '4 x Cortex-A55' '4 x Cortex-A76' \
     'dotprod +yes +/ yes' 'i8mm +no' 'GGML_CPU_ARM_ARCH=armv8.2-a\+dotprod\+fp16' \
-    '-t 4 -tb 4 -C 0xF0 -Cb 0xF0 --cpu-strict 1'
+    '-t 4 -tb 4 -C 0xF0 -Cb 0xF0 --cpu-strict 1' 'cpu-threads-bench.sh MODEL.gguf'
 
 mkbuild "$WORK/b-ok" OFF "armv8.2-a+dotprod+fp16"
 run "portable build for this board passes" 0 "$RK" --check-build "$WORK/b-ok" -- 'PASS\] asimddp' 'PASS\] asimdhp'

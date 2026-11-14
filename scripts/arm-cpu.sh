@@ -96,9 +96,11 @@ echo
 echo "== Running llama.cpp"
 if [ "$NFAST" -lt "$NALL" ]; then
   MASK=$(echo "$FAST" | awk '{ m += 2 ^ $1 } END { printf "0x%X", m }')
-  echo "  Big.LITTLE: keep llama.cpp on the $NFAST fast cores (prompt reading and sampling run there):"
+  echo "  Big.LITTLE: a safe start is the $NFAST fast cores, one thread pinned to each:"
   echo "    -t $NFAST -tb $NFAST -C $MASK -Cb $MASK --cpu-strict 1"
   echo "  (llama.cpp pins each thread itself; this replaces taskset, and the slow cores stay free for the GPU driver)"
+  echo "  Using every core can still be faster, and so can a longer thread spin. Measure it on your model:"
+  echo "    scripts/cpu-threads-bench.sh MODEL.gguf [-- -ngl 99 ...]"
 else
   echo "  All cores are alike: -t $NALL (add -C/--cpu-strict only to share the machine)"
 fi
