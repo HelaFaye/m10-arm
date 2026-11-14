@@ -59,6 +59,8 @@ machine.
 | Loads on an Orange Pi 5 Plus | ❌ not yet tried |
 | `nvidia-smi` sees 4× M10 | ❌ not yet tried |
 | CUDA self-test passes | ❌ not yet tried |
+| `arm-cpu.sh`, `gpu-parity.sh` on fake CPU trees and a stand-in `test-backend-ops` (`tests/test-*.sh`) | ✅ 9/9 and 4/4 |
+| `gpu-parity.sh` on the four M10 GPUs | ❌ not yet tried |
 
 ## Requirements
 
@@ -103,7 +105,33 @@ The driver's `libcuda` and `nvidia-uvm` come from your `.run`. Use **CUDA 12.9**
 
 ```sh
 cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=50 && cmake --build build -j8
+scripts/gpu-parity.sh          # do all four GPUs compute what the CPU does? (below)
 ```
+
+### Host CPU and GPU parity
+
+Two scripts follow [Llaminar](https://github.com/Llaminar/llaminar)'s native ARM port (`feat/arm64-native-kernels`):
+it trusts only what the executing CPU says it supports, and it checks every kernel against a reference before
+counting it. The same scripts are in the mi50-arm repository.
+
+- **`scripts/arm-cpu.sh`** reads each core's instructions from `/proc/cpuinfo`.
+  - **Building:** on RK3588 every core has dotprod and fp16, but none has i8mm, bf16 or SVE. A llama.cpp built
+    elsewhere for this board needs `-DGGML_NATIVE=OFF -DGGML_CPU_ARM_ARCH=armv8.2-a+dotprod+fp16`.
+  - **Checking a build:** `--check-build ~/llama.cpp/build` fails a build that uses instructions this CPU lacks.
+    That build would otherwise die with SIGILL.
+  - **Threads:** pin llama.cpp to the A76 cores with its own flags, `-t 4 -tb 4 -C 0xF0 -Cb 0xF0 --cpu-strict 1`.
+- **`scripts/gpu-parity.sh`** runs llama.cpp's `test-backend-ops`. It compares every operation on each of the M10's
+  four GPUs (`CUDA0`–`CUDA3`) with the CPU.
+  - **Why:** on this non-coherent board, stale data from a wrongly mapped buffer gives wrong numbers, not a crash.
+    This run is what shows the patched driver's uncached mappings working.
+  - **Exit status:** 0 when every GPU matched, 1 on a mismatch (the log keeps the failing cases), and 3 when
+    llama.cpp saw no GPU. `test-backend-ops` alone reports success in that last case.
+
+[mx-llama.cpp](https://github.com/mxxm-t/mx-llama.cpp) is a llama.cpp fork whose multi-GPU additions are
+backend-generic: `-sm tensor -tps N` groups GPUs into tensor-parallel stages. It has not been tried on Maxwell or
+on this board. If you try it on the M10, run `gpu-parity.sh` with its build first. Leave its peer-write AllReduce off
+(`GGML_ENABLE_CUSTOM_AR=0`) until that passes, because it relies on peer-to-peer access the non-coherent host may
+not support.
 
 ## Known risks
 
