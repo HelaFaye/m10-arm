@@ -33,3 +33,7 @@
 
 - [Jeff Geerling](https://www.jeffgeerling.com/blog/2025/nvidia-graphics-cards-work-on-pi-5-and-rockchip/)
   documented NVIDIA GPUs on Pi 5 and Rockchip, which pointed to the upstream fixes.
+
+- [Llaminar](https://github.com/Llaminar/llaminar)'s native ARM port (`feat/arm64-native-kernels`). Its CPU feature
+  admission (`ARMCPUFeatures.h`) and parity-first kernel checks shaped `scripts/arm-cpu.sh` and
+  `scripts/gpu-parity.sh`. No Llaminar code is included.
